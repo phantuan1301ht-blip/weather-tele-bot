@@ -2,19 +2,18 @@ name: Rain Watch (every 5 minutes)
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/5 * * * *"   # mỗi 5 phút
   workflow_dispatch: {}
 
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # 1️⃣ Lấy code
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
+      # 2️⃣ Restore cache trạng thái (chống spam)
       - name: Restore state cache
         uses: actions/cache@v4
         with:
@@ -23,18 +22,24 @@ jobs:
           restore-keys: |
             weather-alert-state-v1
 
-      - name: Install deps
+      # 3️⃣ Tạo thư mục state nếu chưa có (RẤT QUAN TRỌNG)
+      - name: Prepare state folder
+        run: mkdir -p .state
+
+      # 4️⃣ Cài Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # 5️⃣ Cài thư viện
+      - name: Install dependencies
         run: pip install requests
 
-      - name: Run (watch)
+      # 6️⃣ Chạy bot watch (cảnh báo mưa)
+      - name: Run weather watch
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           MODE: watch
         run: python weather_forecast_3loc.py
-
-      - name: Save state cache
-        uses: actions/cache@v4
-        with:
-          path: .state
-          key: weather-alert-state-v1
