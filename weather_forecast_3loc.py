@@ -4,164 +4,234 @@ from datetime import datetime, timedelta, timezone
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+MODE = os.getenv("MODE", "daily").strip().lower()  # "daily" hoặc "watch"
 
 VN_TZ = timezone(timedelta(hours=7))
 TZ_NAME = "Asia/Ho_Chi_Minh"
 
-# =========================
-# VỊ TRÍ (ĐÃ SỬA THEO YÊU CẦU)
-# =========================
 LOCATIONS = [
-    # Nhà thờ Dĩ An – vẫn hiển thị tên là Dĩ An
-    {"name": "Dĩ An (Bình Dương)", "lat": 10.9087, "lon": 106.7690},
-
-    # Huyện Đức Thọ – Hà Tĩnh
+    {"name": "Dĩ An (Bình Dương)", "lat": 10.9087, "lon": 106.7690},  # gần Nhà thờ Dĩ An
     {"name": "Huyện Đức Thọ (Hà Tĩnh)", "lat": 18.5401307, "lon": 105.5855438},
 ]
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
-# =========================
-# NGƯỠNG CẢNH BÁO
-# =========================
-RAIN_NOTICE = 30   # ≥30%: có khả năng mưa
-RAIN_HIGH = 50     # ≥50%: mưa cao
-RAIN_HEAVY = 70    # ≥70%: mưa lớn
+# Khung giờ bản tổng hợp
+START_HOUR = 9
+END_HOUR = 23
 
-HEAT_NOTICE = 30   # ≥30°C: nóng
-HEAT_ALERT = 33    # ≥33°C: nắng nóng
+# Ngưỡng mưa
+RAIN_POP_NOTICE = 30     # có thể mưa
+RAIN_POP_HIGH = 50       # mưa cao
+RAIN_POP_URGENT = 70     # mưa rất cao (cảnh báo nhanh)
 
-COLD_NOTICE = 18   # ≤18°C: lạnh
-COLD_ALERT = 15    # ≤15°C: rất lạnh
-# =========================
+RAIN_MM_NOTICE = 0.2     # mm/h: có mưa đo được
+RAIN_MM_MODERATE = 1.0   # mm/h: mưa đáng chú ý
+RAIN_MM_HEAVY = 5.0      # mm/h: mưa to
 
-def icon(code: int) -> str:
-    if code == 0: return "☀️"
-    if code in (1, 2): return "⛅"
-    if code == 3: return "☁️"
-    if code in (45, 48): return "🌫️"
-    if code in (51, 53, 55): return "🌦️"
-    if code in (61, 63, 65, 80, 81, 82): return "🌧️"
-    if code in (95, 96, 99): return "⛈️"
-    return "🌡️"
+# Nhiệt độ
+COLD_NOTICE = 18
+COLD_ALERT = 15
+
+# Chống spam trong chế độ watch:
+# chỉ gửi lại tối đa mỗi 30 phút (phút 00 hoặc 30)
+WATCH_SEND_MINUTES = {0, 30}
+
+def send(text: str) -> None:
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    r = requests.post(
+        url,
+        json={
+            "chat_id": CHAT_ID,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        },
+        timeout=20,
+    )
+    r.raise_for_status()
 
 def fetch(lat: float, lon: float) -> dict:
     params = {
         "latitude": lat,
         "longitude": lon,
         "timezone": TZ_NAME,
-        "hourly": "temperature_2m,precipitation_probability,weather_code,wind_speed_10m",
-        "forecast_days": 1
+        "forecast_days": 1,
+        "hourly": ",".join([
+            "temperature_2m",
+            "precipitation_probability",
+            "precipitation",  # mm/h
+        ]),
     }
     r = requests.get(OPEN_METEO_URL, params=params, timeout=20)
     r.raise_for_status()
     return r.json()
 
-def send(text: str) -> None:
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    r = requests.post(url, json={
-        "chat_id": CHAT_ID,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True
-    }, timeout=20)
-    r.raise_for_status()
+def parse_rows_today(data: dict, today_date):
+    h = data.get("hourly", {})
+    times = h.get("time", [])
+    temps = h.get("temperature_2m", [])
+    pops  = h.get("precipitation_probability", [])
+    mms   = h.get("precipitation", [])
 
-def summarize_alerts(rows):
-    rain_hours = [r["hour"] for r in rows if r["pop"] >= RAIN_NOTICE]
-    rain_heavy = [r["hour"] for r in rows if r["pop"] >= RAIN_HEAVY]
+    rows = []
+    for t, temp, pop, mm in zip(times, temps, pops, mms):
+        dt = datetime.fromisoformat(t)
+        if dt.date() == today_date:
+            rows.append({
+                "dt": dt,
+                "hour": dt.hour,
+                "temp": float(temp) if temp is not None else 0.0,
+                "pop": int(pop) if pop is not None else 0,
+                "mm": float(mm) if mm is not None else 0.0,
+            })
+    return rows
 
-    max_row = max(rows, key=lambda x: x["temp"])
-    min_row = min(rows, key=lambda x: x["temp"])
+def compress_hour_ranges(hours):
+    if not hours:
+        return ""
+    hours = sorted(set(hours))
+    ranges = []
+    start = prev = hours[0]
+    for h in hours[1:]:
+        if h == prev + 1:
+            prev = h
+        else:
+            ranges.append((start, prev))
+            start = prev = h
+    ranges.append((start, prev))
 
-    parts = []
+    out = []
+    for s, e in ranges:
+        if s == e:
+            out.append(f"{s:02d}:00")
+        else:
+            out.append(f"{s:02d}:00–{e:02d}:00")
+    return ", ".join(out)
 
-    # Mưa
-    if rain_heavy:
-        parts.append(
-            f"🌧️ <b>CẢNH BÁO MƯA LỚN</b>: {', '.join(f'{h:02d}:00' for h in rain_heavy)}"
-        )
+def worst_rain(rows):
+    max_mm = max((r["mm"] for r in rows), default=0.0)
+    max_pop = max((r["pop"] for r in rows), default=0)
+    if max_mm >= RAIN_MM_HEAVY:
+        level = "MƯA TO"
+    elif max_mm >= RAIN_MM_MODERATE:
+        level = "MƯA ĐÁNG CHÚ Ý"
+    elif max_mm >= RAIN_MM_NOTICE or max_pop >= RAIN_POP_HIGH:
+        level = "MƯA KHẢ NĂNG CAO"
+    elif max_pop >= RAIN_POP_NOTICE:
+        level = "CÓ THỂ MƯA"
+    else:
+        level = "KHÔ RÁO"
+    return level, max_pop, max_mm
+
+def build_daily_block(name: str, rows_window: list) -> str:
+    max_row = max(rows_window, key=lambda x: x["temp"])
+    min_row = min(rows_window, key=lambda x: x["temp"])
+    tmax, hmax = max_row["temp"], max_row["hour"]
+    tmin, hmin = min_row["temp"], min_row["hour"]
+
+    rain_hours = [r["hour"] for r in rows_window if (r["pop"] >= RAIN_POP_NOTICE) or (r["mm"] >= RAIN_MM_NOTICE)]
+    rain_hours_high = [r["hour"] for r in rows_window if (r["pop"] >= RAIN_POP_HIGH) or (r["mm"] >= RAIN_MM_MODERATE)]
+
+    level, max_pop, max_mm = worst_rain(rows_window)
+
+    lines = [f"📍 <b>{name}</b>"]
+
+    if rain_hours_high:
+        lines.append(f"🌧️ <b>Mưa (khả năng cao)</b>: {compress_hour_ranges(rain_hours_high)}")
+        lines.append(f"☔ <b>Khả năng mưa tối đa</b>: {max_pop}% | 🌧️ <b>Max</b>: {max_mm:.1f}mm/h")
+        lines.append("🧥 <b>Nhắc:</b> Mang áo mưa/ô khi ra ngoài.")
     elif rain_hours:
-        parts.append(
-            f"☔ <b>Có khả năng mưa</b>: {', '.join(f'{h:02d}:00' for h in rain_hours)}"
-        )
+        lines.append(f"☔ <b>Có thể mưa</b>: {compress_hour_ranges(rain_hours)}")
+        lines.append(f"☔ <b>Khả năng mưa tối đa</b>: {max_pop}% | 🌧️ <b>Max</b>: {max_mm:.1f}mm/h")
+        lines.append("🧥 <b>Nhắc:</b> Nên mang áo mưa/ô dự phòng.")
     else:
-        parts.append("🌧️ <b>Mưa</b>: Không có mưa đáng kể")
+        lines.append("🌤️ <b>Mưa</b>: Không có khung giờ mưa đáng kể.")
+        lines.append("🧥 <b>Nhắc:</b> Khô ráo, nên mang áo khoác nhẹ.")
 
-    # Nóng
-    if max_row["temp"] >= HEAT_ALERT:
-        parts.append(
-            f"🔥 <b>CẢNH BÁO NẮNG NÓNG</b>: {max_row['temp']:.0f}°C lúc {max_row['hour']:02d}:00"
-        )
-    elif max_row["temp"] >= HEAT_NOTICE:
-        parts.append(
-            f"🔥 <b>Nóng nhẹ</b>: {max_row['temp']:.0f}°C lúc {max_row['hour']:02d}:00"
-        )
-    else:
-        parts.append(
-            f"🌡️ <b>Nhiệt độ cao nhất</b>: {max_row['temp']:.0f}°C"
-        )
+    lines.append(f"🔥 <b>Cao nhất</b>: {tmax:.0f}°C lúc {hmax:02d}:00")
+    lines.append(f"❄️ <b>Thấp nhất</b>: {tmin:.0f}°C lúc {hmin:02d}:00")
 
-    # Lạnh
-    if min_row["temp"] <= COLD_ALERT:
-        parts.append(
-            f"🥶 <b>CẢNH BÁO LẠNH</b>: {min_row['temp']:.0f}°C lúc {min_row['hour']:02d}:00"
-        )
-    elif min_row["temp"] <= COLD_NOTICE:
-        parts.append(
-            f"❄️ <b>Trời lạnh</b>: {min_row['temp']:.0f}°C lúc {min_row['hour']:02d}:00"
-        )
-    else:
-        parts.append(
-            f"🌙 <b>Nhiệt độ thấp nhất</b>: {min_row['temp']:.0f}°C"
-        )
+    if tmin <= COLD_ALERT:
+        lines.append("🧣 <b>Nhắc:</b> Trời lạnh, nhớ mặc ấm (tối/đêm).")
+    elif tmin <= COLD_NOTICE:
+        lines.append("🧣 <b>Nhắc:</b> Buổi tối se lạnh, nên mang thêm áo khoác.")
 
-    return "\n".join(parts)
+    lines.append(f"📌 <i>Mức dự báo mưa:</i> {level}")
+    return "\n".join(lines)
 
-def main():
-    now = datetime.now(VN_TZ).strftime("%Y-%m-%d %H:%M")
-    today = datetime.now(VN_TZ).date()
+def next_hour_row(rows_today, now_vn):
+    # 1 giờ tới: lấy giờ kế tiếp
+    target_hour = (now_vn.hour + 1) % 24
+    candidates = [r for r in rows_today if r["hour"] == target_hour]
+    if not candidates:
+        return None
+    # lấy cái gần nhất
+    candidates.sort(key=lambda x: abs((x["dt"] - now_vn).total_seconds()))
+    return candidates[0]
 
-    header = (
-        f"🌦️ <b>DỰ BÁO THỜI TIẾT & CẢNH BÁO</b>\n"
-        f"🕒 {now} (Giờ Việt Nam)\n"
-        f"⏰ Khung giờ: 09:00 – 23:00\n"
+def build_quick_alert(now_vn, loc_name, fc):
+    return (
+        f"⛈️ <b>CẢNH BÁO MƯA SẮP XẢY RA</b>\n"
+        f"🕒 {now_vn.strftime('%Y-%m-%d %H:%M')} (VN)\n\n"
+        f"📍 <b>{loc_name}</b>\n"
+        f"⏰ Trong 1 giờ tới (khoảng <b>{fc['hour']:02d}:00</b>)\n"
+        f"☔ <b>Khả năng mưa</b>: <b>{fc['pop']}%</b>\n"
+        f"🌧️ <b>Lượng mưa dự báo</b>: <b>{fc['mm']:.1f} mm/h</b>\n\n"
+        f"🧥 <b>Nhắc:</b> Ra ngoài nhớ mang áo mưa/ô."
     )
 
-    blocks = []
+def run_watch(now_vn):
+    # chống spam: chỉ gửi ở phút 00 hoặc 30
+    if now_vn.minute not in WATCH_SEND_MINUTES:
+        return
+
+    today = now_vn.date()
+    alerts = []
 
     for loc in LOCATIONS:
         data = fetch(loc["lat"], loc["lon"])
-        h = data["hourly"]
+        rows_today = parse_rows_today(data, today)
+        fc = next_hour_row(rows_today, now_vn)
+        if not fc:
+            continue
 
-        rows = []
-        table = []
+        # cảnh báo khi pop > 70%
+        if fc["pop"] > RAIN_POP_URGENT:
+            alerts.append(build_quick_alert(now_vn, loc["name"], fc))
 
-        for t, temp, pop, code, wind in zip(
-            h["time"], h["temperature_2m"], h["precipitation_probability"],
-            h["weather_code"], h["wind_speed_10m"]
-        ):
-            dt = datetime.fromisoformat(t)
-            if dt.date() == today and 9 <= dt.hour <= 23:
-                rows.append({
-                    "hour": dt.hour,
-                    "temp": float(temp),
-                    "pop": int(pop),
-                })
-                table.append(
-                    f"{dt.hour:02d}:00 {icon(int(code))} {temp:.0f}°C | ☔{int(pop)}% | 💨{wind:.0f}km/h"
-                )
+    if alerts:
+        send("\n\n──────────────\n\n".join(alerts))
 
-        alert = summarize_alerts(rows)
+def run_daily(now_vn):
+    today = now_vn.date()
+    header = (
+        f"🌦️ <b>DỰ BÁO & CẢNH BÁO THỜI TIẾT</b>\n"
+        f"🕒 {now_vn.strftime('%Y-%m-%d %H:%M')} (Giờ Việt Nam)\n"
+        f"⏰ Áp dụng khung giờ: {START_HOUR:02d}:00–{END_HOUR:02d}:00\n"
+    )
 
-        blocks.append(
-            f"\n\n📍 <b>{loc['name']}</b>\n"
-            f"{alert}\n"
-            f"──────────────\n"
-            + "\n".join(table)
-        )
+    blocks = []
+    for loc in LOCATIONS:
+        data = fetch(loc["lat"], loc["lon"])
+        rows_today = parse_rows_today(data, today)
+        rows_window = [r for r in rows_today if START_HOUR <= r["hour"] <= END_HOUR]
 
-    send(header + "".join(blocks))
+        if not rows_window:
+            blocks.append(f"📍 <b>{loc['name']}</b>\n⚠️ Không lấy được dữ liệu trong khung giờ yêu cầu.")
+            continue
+
+        blocks.append(build_daily_block(loc["name"], rows_window))
+
+    send(header + "\n\n" + "\n\n".join(blocks))
+
+def main():
+    now_vn = datetime.now(VN_TZ)
+
+    if MODE == "watch":
+        run_watch(now_vn)
+    else:
+        run_daily(now_vn)
 
 if __name__ == "__main__":
     main()
