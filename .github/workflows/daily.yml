@@ -12,16 +12,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # ✅ Restore state cache để nhớ đã gửi cảnh báo/cooldown
+      # ✅ Restore state cache (latest)
       - name: Restore state cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: .state
-          key: weather-state-${{ github.ref }}
+          key: weather-state-v1-${{ github.run_id }}
           restore-keys: |
-            weather-state-
+            weather-state-v1-
 
-      # ✅ đảm bảo thư mục state tồn tại
       - name: Prepare state folder
         run: mkdir -p .state
 
@@ -39,3 +38,10 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           MODE: daily
         run: python weather_forecast_3loc.py
+
+      # ✅ Save updated state
+      - name: Save state cache
+        uses: actions/cache/save@v4
+        with:
+          path: .state
+          key: weather-state-v1-${{ github.run_id }}
