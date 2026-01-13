@@ -9,11 +9,30 @@ jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ✅ Restore state cache để nhớ đã gửi cảnh báo/cooldown
+      - name: Restore state cache
+        uses: actions/cache@v4
+        with:
+          path: .state
+          key: weather-state-${{ github.ref }}
+          restore-keys: |
+            weather-state-
+
+      # ✅ đảm bảo thư mục state tồn tại
+      - name: Prepare state folder
+        run: mkdir -p .state
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install requests
+
+      - name: Install dependencies
+        run: pip install requests
+
       - name: Run (daily)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
