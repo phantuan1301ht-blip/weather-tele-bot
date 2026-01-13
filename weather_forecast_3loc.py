@@ -183,6 +183,7 @@ def get_row_by_hour(rows_today, hour: int):
 
 
 def compress_hour_ranges(hours):
+    """e.g. [11,12,13,16,17] -> '11:00–13:00, 16:00–17:00' """
     if not hours:
         return ""
     hours = sorted(set(hours))
@@ -195,6 +196,7 @@ def compress_hour_ranges(hours):
             ranges.append((s, p))
             s = p = h
     ranges.append((s, p))
+
     out = []
     for a, b in ranges:
         out.append(f"{a:02d}:00" if a == b else f"{a:02d}:00–{b:02d}:00")
@@ -312,8 +314,14 @@ def build_daily_block(name: str, current_temp, rows_window: list, now_status_lin
     tmax, hmax = max_row["temp"], max_row["hour"]
     tmin, hmin = min_row["temp"], min_row["hour"]
 
-    rain_hours = [r["hour"] for r in rows_window if (r["pop"] >= RAIN_POP_NOTICE) or (r["mm"] >= RAIN_MM_NOTICE)]
-    rain_hours_high = [r["hour"] for r in rows_window if (r["pop"] >= RAIN_POP_HIGH) or (r["mm"] >= RAIN_MM_MODERATE)]
+    # ✅ FIX: gom nhiều khung giờ mưa rõ ràng (không chỉ 1 giờ)
+    rain_hours = []
+    rain_hours_high = []
+    for r in rows_window:
+        if (r["mm"] >= RAIN_MM_MODERATE) or (r["pop"] >= RAIN_POP_HIGH):
+            rain_hours_high.append(r["hour"])
+        elif (r["mm"] >= RAIN_MM_NOTICE) or (r["pop"] >= RAIN_POP_NOTICE):
+            rain_hours.append(r["hour"])
 
     max_mm = max((r["mm"] for r in rows_window), default=0.0)
     max_pop = max((r["pop"] for r in rows_window), default=0)
@@ -344,7 +352,7 @@ def build_daily_block(name: str, current_temp, rows_window: list, now_status_lin
         lines.append(f"☔ <b>Tối đa</b>: {max_pop}% | 🌧️ {max_mm:.1f}mm/h • <i>{intensity}</i>")
         lines.append("🧥 <b>Nhắc</b>: Mang áo mưa/ô khi ra ngoài.")
     elif rain_hours:
-        lines.append(f"🔴 <b>MƯA</b>: Có thể mưa ({compress_hour_ranges(rain_hours)})")
+        lines.append(f"🟠 <b>MƯA</b>: Có thể mưa ({compress_hour_ranges(rain_hours)})")
         lines.append(f"☔ <b>Tối đa</b>: {max_pop}% | 🌧️ {max_mm:.1f}mm/h • <i>{intensity}</i>")
         lines.append("🧥 <b>Nhắc</b>: Nên mang áo mưa/ô dự phòng.")
     else:
@@ -364,7 +372,6 @@ def build_daily_block(name: str, current_temp, rows_window: list, now_status_lin
 
 
 def run_watch(now_vn):
-    # quiet time
     if is_quiet_time(now_vn):
         return
 
@@ -397,29 +404,13 @@ def run_watch(now_vn):
             event_key = f"{today.isoformat()}|{loc_key}|RAINING|{now_vn.hour:02d}"
             if is_duplicate_event(state, loc_key, event_key):
                 continue
-
-            alerts.append(
-                build_alert_raining_now(
-                    loc["name"], now_vn, cond["now_mm"], cond["data_hour_now"]
-                )
-            )
+            alerts.append(build_alert_raining_now(loc["name"], now_vn, cond["now_mm"], cond["data_hour_now"]))
             mark_sent(state, loc_key, now_ts, event_key)
-
         else:
             event_key = f"{today.isoformat()}|{loc_key}|NEXT1H|{cond['next_hour']:02d}"
             if is_duplicate_event(state, loc_key, event_key):
                 continue
-
-            alerts.append(
-                build_alert_next_hour(
-                    loc["name"],
-                    now_vn,
-                    cond["next_hour"],
-                    cond["next_pop"],
-                    cond["next_mm"],
-                    cond["data_hour_next"],
-                )
-            )
+            alerts.append(build_alert_next_hour(loc["name"], now_vn, cond["next_hour"], cond["next_pop"], cond["next_mm"], cond["data_hour_next"]))
             mark_sent(state, loc_key, now_ts, event_key)
 
     if alerts:
@@ -438,6 +429,7 @@ def run_daily(now_vn):
 
     blocks = []
     state = load_state()
+    now_ts_daily = int(now_vn.timestamp())
 
     for loc in LOCATIONS:
         data = fetch(loc["lat"], loc["lon"])
@@ -458,8 +450,7 @@ def run_daily(now_vn):
         else:
             blocks.append(f"{fmt_location_title(loc['name'])}\n⚠️ Không lấy được dữ liệu.")
 
-        # ✅ daily also "counts" as an alert for cooldown per location (optional but useful)
-        now_ts_daily = int(now_vn.timestamp())
+        # ✅ daily counts as an alert for cooldown per location (if raining/likely soon)
         cond = detect_rain_now_and_next_hour(rows_today, now_vn)
         loc_key = loc["name"]
         if cond["raining_now"]:
