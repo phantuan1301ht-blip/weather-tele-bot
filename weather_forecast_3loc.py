@@ -16,27 +16,23 @@ LOCATIONS = [
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
-# Daily window
 START_HOUR = 9
 END_HOUR = 23
 
-# Rain thresholds
 RAIN_POP_NOTICE = 30
 RAIN_POP_HIGH = 50
-RAIN_POP_URGENT = 70  # watch mode: >70% in next hour
+RAIN_POP_URGENT = 70
 
 RAIN_MM_NOTICE = 0.2
 RAIN_MM_MODERATE = 1.0
 RAIN_MM_HEAVY = 5.0
 
-# Temperature thresholds
 COLD_NOTICE = 18
 COLD_ALERT = 15
 
-# Watch anti-spam (send at minute 00 or 30 only)
 WATCH_SEND_MINUTES = {0, 30}
 
-DIVIDER = "━━━━━━━━━━━━━━━━━━━━"
+DIVIDER = "──────────────"  # ngắn gọn, đẹp trên iPhone
 
 def send(text: str) -> None:
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -53,9 +49,6 @@ def send(text: str) -> None:
     r.raise_for_status()
 
 def fetch(lat: float, lon: float) -> dict:
-    """
-    Public API (no key). Adds current temperature for "nhiệt độ hiện tại".
-    """
     params = {
         "latitude": lat,
         "longitude": lon,
@@ -94,7 +87,6 @@ def parse_rows_today(data: dict, today_date):
 
 def get_current_temp(data: dict):
     cur = data.get("current", {})
-    # Open-Meteo returns "temperature_2m" and "time" under "current"
     if isinstance(cur, dict) and "temperature_2m" in cur:
         try:
             return float(cur["temperature_2m"])
@@ -151,42 +143,37 @@ def build_daily_block(name: str, current_temp, rows_window: list) -> str:
 
     level, max_pop, max_mm = worst_rain(rows_window)
 
-    # --- Pretty layout ---
+    cur_text = f"{current_temp:.0f}°C" if current_temp is not None else "N/A"
+
+    # --- iPhone-friendly compact lines ---
     lines = []
     lines.append(f"📍 <b>{name}</b>")
+    lines.append(f"🌡️ <b>Hiện tại</b>: {cur_text}")
 
-    # Current temp
-    if current_temp is not None:
-        lines.append(f"🌡️ <b>Hiện tại</b>: {current_temp:.0f}°C")
-    else:
-        lines.append("🌡️ <b>Hiện tại</b>: (không lấy được)")
-
-    # Rain summary
+    # Rain line MUST be bold + “red-like” via emoji
     if rain_hours_high:
-        lines.append(f"🌧️ <b>Mưa (khả năng cao)</b>: {compress_hour_ranges(rain_hours_high)}")
-        lines.append(f"📌 <b>Mưa tối đa</b>: ☔{max_pop}% | 🌧️{max_mm:.1f}mm/h")
-        lines.append("🧥 <b>Nhắc</b>: Mang áo mưa/ô khi ra ngoài.")
+        lines.append(f"🔴 <b>MƯA (khả năng cao)</b>: {compress_hour_ranges(rain_hours_high)}")
+        lines.append(f"☔ <b>Tối đa</b>: {max_pop}% | 🌧️ {max_mm:.1f}mm/h")
+        lines.append("🧥 <b>Nhắc</b>: Mang áo mưa/ô.")
     elif rain_hours:
-        lines.append(f"☔ <b>Có thể mưa</b>: {compress_hour_ranges(rain_hours)}")
-        lines.append(f"📌 <b>Mưa tối đa</b>: ☔{max_pop}% | 🌧️{max_mm:.1f}mm/h")
+        lines.append(f"🟥 <b>CÓ THỂ MƯA</b>: {compress_hour_ranges(rain_hours)}")
+        lines.append(f"☔ <b>Tối đa</b>: {max_pop}% | 🌧️ {max_mm:.1f}mm/h")
         lines.append("🧥 <b>Nhắc</b>: Nên mang áo mưa/ô dự phòng.")
     else:
-        lines.append("🌤️ <b>Mưa</b>: Không có khung giờ mưa đáng kể.")
-        lines.append("🧥 <b>Nhắc</b>: Khô ráo, nên mang áo khoác nhẹ.")
+        lines.append("🟢 <b>MƯA</b>: Không có khung giờ mưa đáng kể.")
+        lines.append("🧥 <b>Nhắc</b>: Khô ráo, mang áo khoác nhẹ.")
 
-    # Max/Min
+    # Max/Min in one compact block
     lines.append(f"🔥 <b>Cao nhất</b>: {tmax:.0f}°C • {hmax:02d}:00")
     lines.append(f"❄️ <b>Thấp nhất</b>: {tmin:.0f}°C • {hmin:02d}:00")
 
-    # Cold advice
+    # Cold reminder (only when needed)
     if tmin <= COLD_ALERT:
-        lines.append("🧣 <b>Nhắc</b>: Trời lạnh, nhớ mặc ấm (tối/đêm).")
+        lines.append("🧣 <b>Nhắc</b>: Trời lạnh, nhớ mặc ấm.")
     elif tmin <= COLD_NOTICE:
-        lines.append("🧣 <b>Nhắc</b>: Buổi tối se lạnh, nên mang thêm áo khoác.")
+        lines.append("🧣 <b>Nhắc</b>: Tối se lạnh, mang thêm áo khoác.")
 
-    # Rain level
     lines.append(f"✅ <b>Đánh giá</b>: {level}")
-
     return "\n".join(lines)
 
 def next_hour_row(rows_today, now_vn):
@@ -205,15 +192,14 @@ def build_quick_alert(now_vn, loc_name, current_temp, fc):
         f"{DIVIDER}\n"
         f"📍 <b>{loc_name}</b>\n"
         f"🌡️ <b>Hiện tại</b>: {cur_text}\n"
-        f"⏰ <b>Dự kiến</b>: khoảng {fc['hour']:02d}:00\n"
-        f"☔ <b>Khả năng mưa</b>: <b>{fc['pop']}%</b>\n"
+        f"🔴 <b>Khả năng mưa</b>: <b>{fc['pop']}%</b>\n"
         f"🌧️ <b>Lượng mưa</b>: <b>{fc['mm']:.1f}mm/h</b>\n"
+        f"⏰ <b>Dự kiến</b>: khoảng {fc['hour']:02d}:00\n"
         f"{DIVIDER}\n"
-        f"🧥 <b>Nhắc</b>: Ra ngoài nhớ mang áo mưa/ô."
+        f"🧥 <b>Nhắc</b>: Mang áo mưa/ô."
     )
 
 def run_watch(now_vn):
-    # Limit spam
     if now_vn.minute not in WATCH_SEND_MINUTES:
         return
 
@@ -224,12 +210,10 @@ def run_watch(now_vn):
         data = fetch(loc["lat"], loc["lon"])
         current_temp = get_current_temp(data)
         rows_today = parse_rows_today(data, today)
-
         fc = next_hour_row(rows_today, now_vn)
         if not fc:
             continue
 
-        # If next hour rain probability > 70%
         if fc["pop"] > RAIN_POP_URGENT:
             alerts.append(build_quick_alert(now_vn, loc["name"], current_temp, fc))
 
@@ -241,7 +225,7 @@ def run_daily(now_vn):
     header = (
         f"🌦️ <b>DỰ BÁO & CẢNH BÁO THỜI TIẾT</b>\n"
         f"🕒 {now_vn.strftime('%Y-%m-%d %H:%M')} (Giờ Việt Nam)\n"
-        f"⏰ Khung giờ: {START_HOUR:02d}:00–{END_HOUR:02d}:00\n"
+        f"⏰ <b>Khung giờ</b>: {START_HOUR:02d}:00–{END_HOUR:02d}:00\n"
         f"{DIVIDER}\n"
     )
 
@@ -258,7 +242,8 @@ def run_daily(now_vn):
 
         blocks.append(build_daily_block(loc["name"], current_temp, rows_window))
 
-    send(header + f"\n\n{DIVIDER}\n\n".join(blocks))
+    # Divider between blocks, but not too long
+    send(header + f"\n{DIVIDER}\n".join(blocks))
 
 def main():
     now_vn = datetime.now(VN_TZ)
