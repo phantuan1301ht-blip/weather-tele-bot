@@ -5,13 +5,22 @@ import requests
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+# =========================
+# ENV
+# =========================
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 MODE = os.getenv("MODE", "daily").strip().lower()  # daily | watch
 
+# =========================
+# TIMEZONE
+# =========================
 VN_TZ = timezone(timedelta(hours=7))
 TZ_NAME = "Asia/Ho_Chi_Minh"
 
+# =========================
+# LOCATIONS
+# =========================
 LOCATIONS = [
     {"name": "Dĩ An (Bình Dương)", "lat": 10.9087, "lon": 106.7690},
     {"name": "Huyện Đức Thọ (Hà Tĩnh)", "lat": 18.5401307, "lon": 105.5855438},
@@ -19,9 +28,15 @@ LOCATIONS = [
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
+# =========================
+# DAILY WINDOW
+# =========================
 START_HOUR = 9
 END_HOUR = 23
 
+# =========================
+# THRESHOLDS
+# =========================
 RAIN_POP_NOTICE = 30
 RAIN_POP_HIGH = 50
 RAIN_POP_URGENT = 70
@@ -32,14 +47,18 @@ RAIN_MM_MODERATE = 1.0
 COLD_NOTICE = 18
 COLD_ALERT = 15
 
-ALERT_COOLDOWN_SECONDS = 3 * 60 * 60  # 3h per location
+# ✅ 3h cooldown per location
+ALERT_COOLDOWN_SECONDS = 3 * 60 * 60  # 3 hours
 
+# Quiet time for watch
 QUIET_START_HOUR = 21
 QUIET_END_HOUR = 7
 QUIET_END_MINUTE = 30
 
 POST_DAILY_ALERT_DELAY_SECONDS = 10
-WATCH_BLOCK_AFTER_DAILY_SECONDS = 180
+
+# ✅ After DAILY, WATCH must wait >= 3 hours before any first alert
+WATCH_BLOCK_AFTER_DAILY_SECONDS = 3 * 60 * 60  # 3 hours
 
 NIGHT_START_HOUR = 18
 NIGHT_END_HOUR = 6
@@ -233,7 +252,7 @@ def detect_rain_now_and_next_hour(rows_today, now_vn):
     if next_row:
         next_pop = next_row["pop"]
         next_mm = next_row["mm"]
-        if (next_pop > RAIN_POP_URGENT) or (next_mm >= RAIN_MM_MODERATE):
+        if (next_pop >= RAIN_POP_URGENT) or (next_mm >= RAIN_MM_MODERATE):
             likely_next_hour = True
 
     return {
@@ -318,7 +337,6 @@ def build_daily_block(name: str, current_temp, rows_window: list, now_status_lin
     lines = []
     lines.append(fmt_location_title(name))
     lines.append(f"🌡️ <b>Hiện tại</b>: {cur_text}")
-    # ✅ thêm trạng thái "đang mưa hay không" giống cảnh báo
     lines.append(now_status_line)
 
     if rain_hours_high:
@@ -346,12 +364,14 @@ def build_daily_block(name: str, current_temp, rows_window: list, now_status_lin
 
 
 def run_watch(now_vn):
+    # quiet time
     if is_quiet_time(now_vn):
         return
 
     state = load_state()
     now_ts = int(now_vn.timestamp())
 
+    # ✅ block watch for 3h after daily
     last_daily_ts = int(state.get("last_daily_ts", 0) or 0)
     if last_daily_ts and (now_ts - last_daily_ts) < WATCH_BLOCK_AFTER_DAILY_SECONDS:
         return
@@ -369,24 +389,37 @@ def run_watch(now_vn):
 
         loc_key = loc["name"]
 
+        # ✅ per-location cooldown 3h
+        if not can_send_by_cooldown(state, loc_key, now_ts):
+            continue
+
         if cond["raining_now"]:
             event_key = f"{today.isoformat()}|{loc_key}|RAINING|{now_vn.hour:02d}"
             if is_duplicate_event(state, loc_key, event_key):
                 continue
-            if not can_send_by_cooldown(state, loc_key, now_ts):
-                continue
 
-            alerts.append(build_alert_raining_now(loc["name"], now_vn, cond["now_mm"], cond["data_hour_now"]))
+            alerts.append(
+                build_alert_raining_now(
+                    loc["name"], now_vn, cond["now_mm"], cond["data_hour_now"]
+                )
+            )
             mark_sent(state, loc_key, now_ts, event_key)
 
         else:
             event_key = f"{today.isoformat()}|{loc_key}|NEXT1H|{cond['next_hour']:02d}"
             if is_duplicate_event(state, loc_key, event_key):
                 continue
-            if not can_send_by_cooldown(state, loc_key, now_ts):
-                continue
 
-            alerts.append(build_alert_next_hour(loc["name"], now_vn, cond["next_hour"], cond["next_pop"], cond["next_mm"], cond["data_hour_next"]))
+            alerts.append(
+                build_alert_next_hour(
+                    loc["name"],
+                    now_vn,
+                    cond["next_hour"],
+                    cond["next_pop"],
+                    cond["next_mm"],
+                    cond["data_hour_next"],
+                )
+            )
             mark_sent(state, loc_key, now_ts, event_key)
 
     if alerts:
@@ -404,11 +437,7 @@ def run_daily(now_vn):
     )
 
     blocks = []
-    daily_data = []
-
-    # load state early to mark cooldown from daily if needed
     state = load_state()
-    now_ts_daily = int(now_vn.timestamp())
 
     for loc in LOCATIONS:
         data = fetch(loc["lat"], loc["lon"])
@@ -416,7 +445,6 @@ def run_daily(now_vn):
         rows_today = parse_rows_today(data, today)
         rows_window = [r for r in rows_today if START_HOUR <= r["hour"] <= END_HOUR]
 
-        # ✅ trạng thái hiện tại "đang mưa hay không"
         now_row = get_row_by_hour(rows_today, now_vn.hour)
         now_mm = float(now_row["mm"]) if now_row else 0.0
         now_intensity = rain_intensity(now_mm)
@@ -429,9 +457,9 @@ def run_daily(now_vn):
             blocks.append(build_daily_block(loc["name"], current_temp, rows_window, now_status_line))
         else:
             blocks.append(f"{fmt_location_title(loc['name'])}\n⚠️ Không lấy được dữ liệu.")
-        daily_data.append((loc, rows_today))
 
-        # ✅ Nếu ngay lúc daily đang mưa hoặc sắp mưa 1h tới → coi như đã cảnh báo 1 lần và chặn 3h
+        # ✅ daily also "counts" as an alert for cooldown per location (optional but useful)
+        now_ts_daily = int(now_vn.timestamp())
         cond = detect_rain_now_and_next_hour(rows_today, now_vn)
         loc_key = loc["name"]
         if cond["raining_now"]:
@@ -443,11 +471,10 @@ def run_daily(now_vn):
 
     send(header + f"\n{BIG_DIV}\n".join(blocks))
 
-    # stamp daily & save state (để watch bị chặn 3h nếu daily đã cảnh báo mưa)
-    state["last_daily_ts"] = int(datetime.now(VN_TZ).timestamp())
+    # ✅ stamp daily time so watch is blocked for 3h
+    state["last_daily_ts"] = int(now_vn.timestamp())
     save_state(state)
 
-    # (vẫn giữ logic alert sau daily 10s, nhưng giờ đã bị cooldown 3h nên sẽ KHÔNG spam nữa)
     time.sleep(POST_DAILY_ALERT_DELAY_SECONDS)
 
 
