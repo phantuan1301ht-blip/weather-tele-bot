@@ -1,47 +1,40 @@
-name: Daily Weather 07:30 VN
+name: GPS Weather Watch (VN 07:30-21:00)
 
 on:
   schedule:
-    - cron: "30 0 * * *"   # 00:30 UTC = 07:30 VN
-  workflow_dispatch: {}
+    # 07:30, 07:45 VN  (00:30, 00:45 UTC)
+    - cron: "30,45 0 * * *"
+    # 08:00 -> 20:45 VN (01:00 -> 13:45 UTC) every 15 min
+    - cron: "*/15 1-13 * * *"
+    # 21:00 VN (14:00 UTC)
+    - cron: "0 14 * * *"
+  workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # ✅ Restore state cache (latest)
-      - name: Restore state cache
-        uses: actions/cache/restore@v4
-        with:
-          path: .state
-          key: weather-state-v1-${{ github.run_id }}
-          restore-keys: |
-            weather-state-v1-
-
-      - name: Prepare state folder
-        run: mkdir -p .state
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install deps
         run: pip install requests
 
-      - name: Run (daily)
+      # Cache state file để giữ cooldown 3 giờ qua các lần chạy
+      - name: Restore state cache
+        uses: actions/cache@v4
+        with:
+          path: .state
+          key: gps-weather-state-v1
+
+      - name: Run watcher
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          MODE: daily
-        run: python weather_forecast_3loc.py
-
-      # ✅ Save updated state
-      - name: Save state cache
-        uses: actions/cache/save@v4
-        with:
-          path: .state
-          key: weather-state-v1-${{ github.run_id }}
+          # URL Worker của bạn (đang có /get?device_id=phone1)
+          WORKER_BASE_URL: "https://wispy-recipe-e63f.bbgaming4-vn.workers.dev"
+          DEVICE_ID: "phone1"
+        run: python weather_forecast_gps.py
